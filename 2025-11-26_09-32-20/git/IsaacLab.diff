@@ -1,0 +1,173 @@
+--- git status ---
+HEAD detached at v2.2.0
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   scripts/reinforcement_learning/rsl_rl/play.py
+	modified:   source/isaaclab/isaaclab/utils/assets.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/direct/franka_cabinet/franka_cabinet_env.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/reach/config/franka/__init__.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	source/isaaclab/isaaclab/utils/assets.py0820
+	vscode.deb
+	wget-log
+	wget-log.1
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/scripts/reinforcement_learning/rsl_rl/play.py b/scripts/reinforcement_learning/rsl_rl/play.py
+index bd186f3799..43e2419793 100644
+--- a/scripts/reinforcement_learning/rsl_rl/play.py
++++ b/scripts/reinforcement_learning/rsl_rl/play.py
+@@ -150,10 +150,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
+ 
+     # export policy to onnx/jit
+     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+-    export_policy_as_jit(policy_nn, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt")
+-    export_policy_as_onnx(
+-        policy_nn, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
+-    )
++    # export_policy_as_jit(policy_nn, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt")
++    # export_policy_as_onnx(
++    #     policy_nn, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
++    # )
+ 
+     dt = env.unwrapped.step_dt
+ 
+diff --git a/source/isaaclab/isaaclab/utils/assets.py b/source/isaaclab/isaaclab/utils/assets.py
+index 2318a9be55..86fedfbad8 100644
+--- a/source/isaaclab/isaaclab/utils/assets.py
++++ b/source/isaaclab/isaaclab/utils/assets.py
+@@ -21,7 +21,7 @@ from typing import Literal
+ import carb
+ import omni.client
+ 
+-NUCLEUS_ASSET_ROOT_DIR = carb.settings.get_settings().get("/persistent/isaac/asset_root/cloud")
++NUCLEUS_ASSET_ROOT_DIR = "/nas/isaacsim_assets/Assets/Isaac/5.0"
+ """Path to the root directory on the Nucleus Server."""
+ 
+ NVIDIA_NUCLEUS_DIR = f"{NUCLEUS_ASSET_ROOT_DIR}/NVIDIA"
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/direct/franka_cabinet/franka_cabinet_env.py b/source/isaaclab_tasks/isaaclab_tasks/direct/franka_cabinet/franka_cabinet_env.py
+index 8e0aab5b0c..406b66cf85 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/direct/franka_cabinet/franka_cabinet_env.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/direct/franka_cabinet/franka_cabinet_env.py
+@@ -390,6 +390,7 @@ class FrankaCabinetEnv(DirectRLEnv):
+             self.drawer_local_grasp_pos[env_ids],
+         )
+ 
++    
+     def _compute_rewards(
+         self,
+         actions,
+@@ -412,12 +413,19 @@ class FrankaCabinetEnv(DirectRLEnv):
+         finger_reward_scale,
+         joint_positions,
+     ):
+-        # distance from hand to the drawer
++    # -------------------------
++    # 1) 距离 & 末端对齐
++    # -------------------------
++    # distance from hand to the drawer
+         d = torch.norm(franka_grasp_pos - drawer_grasp_pos, p=2, dim=-1)
+         dist_reward = 1.0 / (1.0 + d**2)
+         dist_reward *= dist_reward
+         dist_reward = torch.where(d <= 0.02, dist_reward * 2, dist_reward)
+ 
++        # === 新增：定义“已经到达把手附近”的掩码 ===
++        NEAR_THRESH = 0.03  # 3 cm 内认为已经到位
++        near_handle = d < NEAR_THRESH
++
+         axis1 = tf_vector(franka_grasp_rot, gripper_forward_axis)
+         axis2 = tf_vector(drawer_grasp_rot, drawer_inward_axis)
+         axis3 = tf_vector(franka_grasp_rot, gripper_up_axis)
+@@ -432,12 +440,29 @@ class FrankaCabinetEnv(DirectRLEnv):
+         # reward for matching the orientation of the hand to the drawer (fingers wrapped)
+         rot_reward = 0.5 * (torch.sign(dot1) * dot1**2 + torch.sign(dot2) * dot2**2)
+ 
++        # -------------------------
++        # 2) 动作正则
++        # -------------------------
+         # regularization on the actions (summed for each environment)
+         action_penalty = torch.sum(actions**2, dim=-1)
+ 
++        # -------------------------
++        # 3) 抽屉开合程度
++        # -------------------------
+         # how far the cabinet has been opened out
+         open_reward = cabinet_dof_pos[:, 3]  # drawer_top_joint
+ 
++        # === 新增：到位后不再给距离奖励，同时加强开抽屉奖励 ===
++        # 3.1 到位后关闭 dist_reward
++        dist_reward = torch.where(near_handle, torch.zeros_like(dist_reward), dist_reward)
++
++        # 3.2 到位后放大 open_reward（例如 x3）
++        PULL_GAIN = 30.0
++        open_reward_eff = torch.where(near_handle, PULL_GAIN * open_reward, open_reward)
++
++        # -------------------------
++        # 4) 指尖位置惩罚（保持不变）
++        # -------------------------
+         # penalty for distance of each finger from the drawer handle
+         lfinger_dist = franka_lfinger_pos[:, 2] - drawer_grasp_pos[:, 2]
+         rfinger_dist = drawer_grasp_pos[:, 2] - franka_rfinger_pos[:, 2]
+@@ -445,31 +470,41 @@ class FrankaCabinetEnv(DirectRLEnv):
+         finger_dist_penalty += torch.where(lfinger_dist < 0, lfinger_dist, torch.zeros_like(lfinger_dist))
+         finger_dist_penalty += torch.where(rfinger_dist < 0, rfinger_dist, torch.zeros_like(rfinger_dist))
+ 
++        # -------------------------
++        # 5) 总奖励
++        # -------------------------
+         rewards = (
+             dist_reward_scale * dist_reward
+             + rot_reward_scale * rot_reward
+-            + open_reward_scale * open_reward
++            + open_reward_scale * open_reward_eff     # 用放大后的开抽屉项
+             + finger_reward_scale * finger_dist_penalty
+             - action_penalty_scale * action_penalty
+         )
+ 
++        # -------------------------
++        # 6) logging
++        # -------------------------
+         self.extras["log"] = {
+             "dist_reward": (dist_reward_scale * dist_reward).mean(),
+             "rot_reward": (rot_reward_scale * rot_reward).mean(),
+-            "open_reward": (open_reward_scale * open_reward).mean(),
++            "open_reward": (open_reward_scale * open_reward_eff).mean(),
+             "action_penalty": (-action_penalty_scale * action_penalty).mean(),
+             "left_finger_distance_reward": (finger_reward_scale * lfinger_dist).mean(),
+             "right_finger_distance_reward": (finger_reward_scale * rfinger_dist).mean(),
+             "finger_dist_penalty": (finger_reward_scale * finger_dist_penalty).mean(),
++            # 方便在 W&B 看看有多少 episode 真正靠近把手
++            "near_handle_ratio": near_handle.float().mean(),
+         }
+ 
+-        # bonus for opening drawer properly
++        # bonus for opening drawer properly（保持原来的分段 bonus）
+         rewards = torch.where(cabinet_dof_pos[:, 3] > 0.01, rewards + 0.25, rewards)
+         rewards = torch.where(cabinet_dof_pos[:, 3] > 0.2, rewards + 0.25, rewards)
+         rewards = torch.where(cabinet_dof_pos[:, 3] > 0.35, rewards + 0.25, rewards)
+ 
+         return rewards
+ 
++
++
+     def _compute_grasp_transforms(
+         self,
+         hand_rot,
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/reach/config/franka/__init__.py b/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/reach/config/franka/__init__.py
+index 8c159b81eb..ae7ab3647c 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/reach/config/franka/__init__.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/reach/config/franka/__init__.py
+@@ -15,6 +15,7 @@ from . import agents
+ # Joint Position Control
+ ##
+ 
++
+ gym.register(
+     id="Isaac-Reach-Franka-v0",
+     entry_point="isaaclab.envs:ManagerBasedRLEnv",
